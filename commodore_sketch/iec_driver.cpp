@@ -47,8 +47,7 @@ IEC::IEC(byte deviceNumber) :
 #ifdef DEBUGLINES
 ,m_lastMillis(0)
 #endif
-{
-} // ctor
+{}
 
 
 byte IEC::timeoutWait(byte waitBit, boolean whileHigh)
@@ -81,15 +80,15 @@ byte IEC::timeoutWait(byte waitBit, boolean whileHigh)
 	while(not readATN());
 
 	// Note: The while above is without timeout. If ATN is held low forever,
-	//       the CBM is out in the woods and needs a reset anyways.
+	//       the CBM is out in the woods and needs a reset anyway
 
 	return true;
 } // timeoutWait
 
 
-// IEC Recieve byte standard function
+// IEC Receive byte standard function
 //
-// Returns data recieved
+// Returns data received
 // Might set flags in iec_state
 //
 // FIXME: m_iec might be better returning bool and returning read byte as reference in order to indicate any error.
@@ -136,12 +135,12 @@ byte IEC::receiveByte(void)
 	for(n = 0; n < 8; n++) {
 		data >>= 1;
 		if(timeoutWait(m_clockPin, false)) {
-      return 0;
-    }
+    		return 0;
+    	}
 		data or_eq (readDATA() ? (1 << 7) : 0);
 		if(timeoutWait(m_clockPin, true)) {
-      return 0;
-    }
+    		return 0;
+    	}
 	}
 
 	// Signal we accepted data:
@@ -214,6 +213,50 @@ boolean IEC::sendByte(byte data, boolean signalEOI)
 	return true;
 } // sendByte
 
+//Semi-fastload protocol "gijoe" read byte
+int16_t IEC::gijoe_read_byte(void) {
+  uint8_t i;
+  uint8_t value = 0;
+  char buffer[80];
+
+  for (i=0;i<4;i++) {
+
+	value >>= 1;
+	if(timeoutWait(m_clockPin, true))  //Wait until clock becomes low/false (wait while high/true)
+		return -1;
+	if (readDATA() == false)
+		value |= 0x80;
+
+	value >>= 1;
+	if(timeoutWait(m_clockPin, false))  //Wait until clock becomes high/true (wait while low/false)
+		return -1;
+	if (readDATA() == false)
+		value |= 0x80;
+
+  }
+
+  return value;
+}
+
+void IEC::setClock(boolean state)
+{
+	writeCLOCK(state);
+} // setClock
+
+void IEC::setData(boolean state)
+{
+	writeDATA(state);
+} // setData
+
+byte IEC::getATN()
+{
+	return readATN();
+} // getATN
+
+byte IEC::getData()
+{
+	return readDATA();
+} // getData
 
 // IEC turnaround
 boolean IEC::turnAround(void)
@@ -256,7 +299,7 @@ boolean IEC::undoTurnAround(void)
 
 // This function checks and deals with atn signal commands
 //
-// If a command is recieved, the cmd-string is saved in cmd. Only commands
+// If a command is received, the cmd-string is saved in cmd. Only commands
 // for *this* device are dealt with.
 //
 // Return value, see IEC::ATNCheck definition.
@@ -344,7 +387,7 @@ IEC::ATNCheck IEC::checkATN(ATNCmd& cmd)
 				return ATN_ERROR;
       }
 
-			// We have recieved a CMD and we should talk now:
+			// We have received a CMD and we should talk now:
 			ret = ATN_CMD_TALK;
 
 		}
@@ -370,13 +413,6 @@ IEC::ATNCheck IEC::checkATN(ATNCmd& cmd)
 	cmd.strLen = i;
 	return ret;
 } // checkATN
-
-
-boolean IEC::checkRESET()
-{
-	return readRESET();
-} // checkATN
-
 
 // IEC_receive receives a byte
 //
@@ -435,11 +471,6 @@ boolean IEC::init()
 	digitalWrite(m_dataPin, false);
 	digitalWrite(m_clockPin, false);
 
-#ifdef RESET_C64
-	pinMode(m_resetPin, OUTPUT);
-	digitalWrite(m_resetPin, false);	// only early C64's could be reset by a slave going high.
-#endif
-
 	// initial pin modes in GPIO.
 	pinMode(m_atnPin, INPUT);
 	pinMode(m_dataPin, INPUT);
@@ -469,7 +500,7 @@ void IEC::testINPUTS()
 //		char buffer[80];
 //		sprintf(buffer, "Lines, ATN: %s CLOCK: %s DATA: %s",
 //						(readATN() ? "HIGH" : "LOW"), (readCLOCK() ? "HIGH" : "LOW"), (readDATA() ? "HIGH" : "LOW"));
-//		Log(Information, FAC_IEC, buffer);
+//		Log(buffer);
 	}
 } // testINPUTS
 
@@ -483,7 +514,7 @@ void IEC::testOUTPUTS()
 		m_lastMillis = now;
 		char buffer[80];
 		sprintf(buffer, "Lines: CLOCK: %s DATA: %s", (lowOrHigh ? "HIGH" : "LOW"), (lowOrHigh ? "HIGH" : "LOW"));
-//		Log(Information, FAC_IEC, buffer);
+//		Log(buffer);
 		writeCLOCK(lowOrHigh);
 		writeDATA(lowOrHigh);
 		lowOrHigh xor_eq true;

@@ -5,19 +5,15 @@
 //#define LOG_ENABLED
 #ifdef LOG_ENABLED
 
-#include <Arduino.h>
-#include "global_defines.h"
-
-#define FAC_MAIN 'M'
-#define FAC_IEC 'I'
-#define FAC_IFACE 'F'
-
-enum Severity { Success, Information, Warning, Error };
-void Log(byte severity , char facility, char* msg);
+inline void Log(char* msg)
+{
+    Serial.print("D:");  //D for debug
+    Serial.println(msg);
+}
 
 #else
 
-#define Log(severity, facility, msg)
+#define Log(msg)
 
 #endif // LOG_ENABLED
 

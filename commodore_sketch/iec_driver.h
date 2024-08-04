@@ -1,14 +1,10 @@
 #ifndef IEC_DRIVER_H
 #define IEC_DRIVER_H
 
-// Define this to reset the commodore 64 when the ino2iec is reset
-//#define RESET_C64
-
 // Enable this to debug the IEC lines (checking soldering and physical connections). See project README.TXT
 //#define DEBUGLINES
 
 #include <Arduino.h>
-#include "global_defines.h"
 #include "cbmdefines.h"
 
 class IEC
@@ -24,12 +20,12 @@ public:
 
 	// Return values for checkATN:
 	enum ATNCheck {
-		ATN_IDLE = 0,       // Nothing recieved of our concern
-		ATN_CMD = 1,        // A command is recieved
-		ATN_CMD_LISTEN = 2, // A command is recieved and data is coming to us
-		ATN_CMD_TALK = 3,   // A command is recieved and we must talk now
+		ATN_IDLE = 0,       // Nothing received of our concern
+		ATN_CMD = 1,        // A command is received
+		ATN_CMD_LISTEN = 2, // A command is received and data is coming to us
+		ATN_CMD_TALK = 3,   // A command is received and we must talk now
 		ATN_ERROR = 4,      // A problem occoured, reset communication
-		ATN_RESET = 5				// The IEC bus is in a reset state (RESET line).
+		ATN_RESET = 5       // The IEC bus is in a reset state (RESET line)
 	};
 
 	// IEC ATN commands:
@@ -67,16 +63,12 @@ public:
 	boolean init();
 
 	// Checks if CBM is sending an attention message. If this is the case,
-	// the message is recieved and stored in atn_cmd.
+	// the message is received and stored in atn_cmd.
 	//
 	ATNCheck checkATN(ATNCmd& cmd);
 
-	// Checks if CBM is sending a reset (setting the RESET line high). This is typicall
-	// when the CBM is reset itself. In this case, we are supposed to reset all states to initial.
-	boolean checkRESET();
-
 	// Sends a byte. The communication must be in the correct state: a load command
-	// must just have been recieved. If something is not OK, FALSE is returned.
+	// must just have been received. If something is not OK, FALSE is returned.
 	//
 	boolean send(byte data);
 
@@ -88,7 +80,7 @@ public:
 	//
 	boolean sendFNF();
 
-	// Recieves a byte
+	// Receives a byte
 	//
 	byte receive();
 
@@ -96,6 +88,15 @@ public:
 	void setDeviceNumber(const byte deviceNumber);
 	void setPins(byte atn, byte clock, byte data, byte reset);
 	IECState state() const;
+
+	//Needed for epyx fastload
+	void setClock(boolean state);
+	void setData(boolean state);
+	byte getATN();
+	byte getData();
+
+	//Read byte using gijoe protocol
+	int16_t gijoe_read_byte(void);
 
 #ifdef DEBUGLINES
 	unsigned long m_lastMillis;

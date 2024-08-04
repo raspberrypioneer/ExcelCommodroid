@@ -1,6 +1,17 @@
 #include <string.h>
 #include "interface.h"
+#include "atomic.h"
+#include "epyxfastload.h"
 #include "log.h"
+
+//Retrieve programs to fastload using serial or included binary rom file
+#define USE_SERIAL
+//#define USE_ROM
+
+#ifdef USE_ROM
+#include "incbin.h"
+INCBIN(ROMFile, "Pengo.prg");
+#endif
 
 using namespace CBM;
 
@@ -18,61 +29,21 @@ Interface::Interface(IEC& iec)
 	// This is ok and won't be overwritten by actual serial data from the host, this is because when this ATNCmd data is in use
 	// only a few bytes of the actual serial data will be used in the buffer.
 	, m_cmd(*reinterpret_cast<IEC::ATNCmd*>(&serCmdIOBuf[sizeof(serCmdIOBuf) / 2]))
-{
-
-	reset();
-} // ctor
-
-
-void Interface::reset(void)
-{
-	m_openState = O_NOTHING;
-	m_queuedError = ErrIntro;
-} // reset
-
-
-void Interface::sendStatus(void)
-{
-	byte i, readResult;
-	COMPORT.write('E'); // ask for error string from the last queued error.
-	COMPORT.write(m_queuedError);
-
-	// first sync the response.
-	do {
-		readResult = COMPORT.readBytes(serCmdIOBuf, 1);
-	} while(readResult not_eq 1 or serCmdIOBuf[0] not_eq ':');
-	// get the string.
-	readResult = COMPORT.readBytesUntil('\r', serCmdIOBuf, sizeof(serCmdIOBuf));
-	if(not readResult)
-		return; // something went wrong with result from host.
-
-	// Length does not include the CR, write all but the last one should be with EOI.
-	for(i = 0; i < readResult - 2; ++i)
-		m_iec.send(serCmdIOBuf[i]);
-	// ...and last byte in string as with EOI marker.
-	m_iec.sendEOI(serCmdIOBuf[i]);
-} // sendStatus
+{}
 
 
 // send single basic line, including heading basic pointer and terminating zero.
 void Interface::sendLine(byte len, char* text, word& basicPtr)
 {
-	byte i;
-
 	// Increment next line pointer
-	// note: minus two here because the line number is included in the array already.
-	basicPtr += len + 5 - 2;
+	basicPtr += len + 5 - 2;  // note: minus two here because the line number is included in the array already
 
 	// Send that pointer
 	m_iec.send(basicPtr bitand 0xFF);
 	m_iec.send(basicPtr >> 8);
 
-	// Send line number
-//	m_iec.send(lineNo bitand 0xFF);
-//	m_iec.send(lineNo >> 8);
-
 	// Send line contents
-	for(i = 0; i < len; i++)
+	for(byte i = 0; i < len; i++)
 		m_iec.send(text[i]);
 
 	// Finish line
@@ -82,191 +53,136 @@ void Interface::sendLine(byte len, char* text, word& basicPtr)
 
 void Interface::sendListing()
 {
+	uint8_t bufLen, bytesRead, bufEnd;
+    boolean firstLine = true;
+
 	// Reset basic memory pointer:
 	word basicPtr = C64_BASIC_START;
-	noInterrupts();
-	// Send load address
-	m_iec.send(C64_BASIC_START bitand 0xff);
-	m_iec.send((C64_BASIC_START >> 8) bitand 0xff);
-	interrupts();
-	// This will be slightly tricker: Need to specify the line sending protocol between Host and Arduino.
-	// Call the listing function
-	byte resp;
+
 	do {
-		COMPORT.println('L'); // initiate request.
-		COMPORT.readBytes(serCmdIOBuf, 2);
-		resp = serCmdIOBuf[0];
-		if('L' == resp) { // Host system will give us something else if we're at last line to send.
-			// get the length as one byte: This is kind of specific: For listings we allow 256 bytes length. Period.
-			byte len = serCmdIOBuf[1];
-			// WARNING: Here we might need to read out the data in portions. The serCmdIOBuf might just be too small
-			// for very long lines.
-			byte actual = COMPORT.readBytes(serCmdIOBuf, len);
-			if(len == actual) {
-				// send the bytes directly to CBM!
-				noInterrupts();
-				sendLine(len, serCmdIOBuf, basicPtr);
-				interrupts();
+		//Serial read buffer will be populated in response to the first directory request and subsequent read requests using 'L'
+		Serial.readBytes(serCmdIOBuf, 2);
+		bufEnd = serCmdIOBuf[0];
+		bufLen = serCmdIOBuf[1];
+		if (bufLen > 0) {
+			bytesRead = Serial.readBytes(serCmdIOBuf, bufLen);
+			noInterrupts();
+			if (firstLine) {  // Send load address
+				m_iec.send(C64_BASIC_START bitand 0xff);
+				m_iec.send((C64_BASIC_START >> 8) bitand 0xff);
+				firstLine = false;
 			}
-			else {
-				resp = 'E'; // just to end the pain. We're out of sync or somthin'
-				sprintf_P(serCmdIOBuf, (PGM_P)F("Expected: %d chars, got %d."), len, actual);
-				Log(Error, FAC_IFACE, serCmdIOBuf);
-			}
+			sendLine(bufLen, serCmdIOBuf, basicPtr);
+			interrupts();
 		}
-		else {
-			if('l' not_eq resp) {
-				sprintf_P(serCmdIOBuf, (PGM_P)F("Ending at char: %d."), resp);
-				Log(Error, FAC_IFACE, serCmdIOBuf);
-				COMPORT.readBytes(serCmdIOBuf, sizeof(serCmdIOBuf));
-				Log(Error, FAC_IFACE, serCmdIOBuf);
-			}
+		if (bufEnd == 'L') {  //'Normal' directory line types received are 'L', except for the last one 'l'
+			Serial.println('L');  //Request another directory line
 		}
-	} while('L' == resp); // keep looping for more lines as long as we got an 'L' indicating we haven't reached end.
+	} while (bufEnd == 'L');  //Continue while 'normal' directory lines are being returned
 
 	// End program with two zeros after last line. Last zero goes out as EOI.
 	noInterrupts();
 	m_iec.send(0);
 	m_iec.sendEOI(0);
 	interrupts();
+
 } // sendListing
 
 
 void Interface::sendFile()
 {
-	// Send file bytes, such that the last one is sent with EOI.
-	byte resp;
-
-	COMPORT.println('S'); // ask for file size.
-	byte len = COMPORT.readBytes(serCmdIOBuf, 3);
-	// it is supposed to answer with S<highByte><LowByte>
-	if(3 not_eq len or serCmdIOBuf[0] not_eq 'S')
-		return; // got some garbage response.
-	word bytesDone = 0, totalSize = (((word)((byte)serCmdIOBuf[1])) << 8) bitor (byte)(serCmdIOBuf[2]);
-
-	sprintf_P(serCmdIOBuf, (PGM_P)F("Size confirm: %u"), totalSize);
-	Log(Information, FAC_IFACE, serCmdIOBuf);
-
-	bool success = true;
-	COMPORT.println('R');											// ask for a byte/bunch of bytes
+	uint8_t bufLen, bytesRead, bufEnd, i;
+	bool ok = true;
 
 	do {
-		len = COMPORT.readBytes(serCmdIOBuf, 2); // read the ack type ('B' or 'E')
+	
+		//Serial read buffer will be populated in response to the first open file request and subsequent read requests using 'R'
+		bytesRead = Serial.readBytes(serCmdIOBuf, 2); // read the ack type ('B' or 'E') and length
+		bufEnd = serCmdIOBuf[0];
+		bufLen = serCmdIOBuf[1];
+		bytesRead = Serial.readBytes(serCmdIOBuf, bufLen); // read the program data bytes
 
-		if(2 not_eq len) {
-			strcpy_P(serCmdIOBuf, (PGM_P)F("2 Host bytes expected, stopping"));
-			Log(Error, FAC_IFACE, serCmdIOBuf);
-			success = false;
-			break;
+		//Ask for more bytes from the PC now, then send the current buffer load to the C64
+#if !defined(__AVR_ATmega328P__)  //Not suitable for Arduino uno
+		if (bufEnd != 'E') Serial.println('R');
+#endif
+
+		for (i = 0; i < bufLen and ok; i++) {
+			noInterrupts();
+			if (bufEnd == 'E' and i == bufLen - 1)
+				ok = m_iec.sendEOI(serCmdIOBuf[i]);  // indicate end of file.
+			else
+				ok = m_iec.send(serCmdIOBuf[i]);
+			interrupts();
 		}
 
-		resp = serCmdIOBuf[0];
-		len = serCmdIOBuf[1];
-		if('B' == resp or 'E' == resp) {
-			byte actual = COMPORT.readBytes(serCmdIOBuf, len);
-
-			if(actual not_eq len) {
-				strcpy_P(serCmdIOBuf, (PGM_P)F("Host bytes expected, stopping"));
-				success = false;
-				Log(Error, FAC_IFACE, serCmdIOBuf);
-				break;
-			}
-
-#ifdef EXPERIMENTAL_SPEED_FIX
-			if('E' not_eq resp) // if not received the final buffer, initiate a new buffer request while we're feeding the CBM.
-				COMPORT.write('R'); // ask for a byte/bunch of bytes
-#endif
-			// so we get some bytes, send them to CBM.
-			for(byte i = 0; success and i < len; ++i) { // End if sending to CBM fails.
-#ifndef EXPERIMENTAL_SPEED_FIX
-				noInterrupts();
-#endif
-				if(resp == 'E' and i == len - 1)
-					success = m_iec.sendEOI(serCmdIOBuf[i]); // indicate end of file.
-				else
-					success = m_iec.send(serCmdIOBuf[i]);
-#ifndef EXPERIMENTAL_SPEED_FIX
-				interrupts();
-#endif
-				++bytesDone;
-
-			}
-
-      if (!success) {
-        sprintf_P(serCmdIOBuf, (PGM_P)F("Something wrong: %u"), bytesDone);
-			  Log(Error, FAC_IFACE, serCmdIOBuf);
-      }
-
-#ifndef EXPERIMENTAL_SPEED_FIX
-			if('E' not_eq resp) // if not received the final buffer, initiate a new buffer request while we're feeding the CBM.
-				COMPORT.println('R'); // ask for a byte/bunch of bytes
-#endif
+		if (!ok) {
+			sprintf_P(serCmdIOBuf, (PGM_P)F("sendFile send bytes problem: %u"), i);
+			Log(serCmdIOBuf);
 		}
-		else {
-      sprintf_P(serCmdIOBuf, (PGM_P)F("Got unexp. cmd resp.char. %c"), resp);
-			Log(Error, FAC_IFACE, serCmdIOBuf);
-			success = false;
-		}
-	} while(resp == 'B' and success); // keep asking for more as long as we don't get the 'E' or something else (indicating out of sync).
-	// If something failed and we have serial bytes in recieve queue we need to flush it out.
-	if(not success and COMPORT.available()) {
-		while(COMPORT.available())
-			COMPORT.read();
+
+#if defined(__AVR_ATmega328P__)  //Suitable for Arduino uno
+      	if (bufEnd != 'E') Serial.println('R');
+#endif
+
+	} while (bufEnd == 'B' and ok); // keep asking for more as long as we don't get the 'E' or something else (indicating out of sync).
+
+	if (ok) {
+		Log("sendFile completed");
 	}
-	if(success) {
-		sprintf_P(serCmdIOBuf, (PGM_P)F("Transferred %u of %u bytes."), bytesDone, totalSize);
-		Log(Success, FAC_IFACE, serCmdIOBuf);
+	else {
+		while (Serial.available())  //Flush out read buffer
+			Serial.read();
 	}
+
 } // sendFile
 
 
 void Interface::saveFile()
 {
 	boolean done = false;
-	// Recieve bytes until a EOI is detected
-	serCmdIOBuf[0] = 'W';
 	do {
-		byte bytesInBuffer = 2;
+
+		// Receive bytes from Commodore until EOI detected
+		uint8_t bufLen = 2;  //Allow for 'W' and length prefix bytes
 		do {
 			noInterrupts();
-			serCmdIOBuf[bytesInBuffer++] = m_iec.receive();
+			serCmdIOBuf[bufLen++] = m_iec.receive();
 			interrupts();
 			done = (m_iec.state() bitand IEC::eoiFlag) or (m_iec.state() bitand IEC::errorFlag);
-		} while((bytesInBuffer < 0xf0) and not done);
-		// indicate to media host that we want to write a buffer. Give the total length including the heading 'W'+length bytes.
-		serCmdIOBuf[1] = bytesInBuffer;
-		COMPORT.write((const byte*)serCmdIOBuf, bytesInBuffer);
-		COMPORT.flush();
-	} while(not done);
+		} while ((bufLen < 0xf0) and not done);
+
+		// Send the bytes onto the PC
+		serCmdIOBuf[0] = 'W';
+		serCmdIOBuf[1] = bufLen;
+		Serial.write((const byte*)serCmdIOBuf, bufLen);
+		Serial.println();
+		Serial.flush();
+
+	} while (not done);
+
 } // saveFile
 
 
 byte Interface::handler(void)
 {
-#ifdef HAS_RESET_LINE
-	if(m_iec.checkRESET()) {
-		// IEC reset line is in reset state, so we should set all states in reset.
-		reset();
-		return IEC::ATN_RESET;
-	}
-#endif
 	noInterrupts();
 	IEC::ATNCheck retATN = m_iec.checkATN(m_cmd);
 	interrupts();
 
 	if(retATN == IEC::ATN_ERROR) {
 		strcpy_P(serCmdIOBuf, (PGM_P)F("ATNCMD: IEC_ERROR!"));
-		Log(Error, FAC_IFACE, serCmdIOBuf);
-		reset();
+		Log(serCmdIOBuf);
 	}
+
 	// Did anything happen from the host side?
 	else if(retATN not_eq IEC::ATN_IDLE) {
-		// A command is recieved, make cmd string null terminated
+		// A command is received, make cmd string null terminated
 		m_cmd.str[m_cmd.strLen] = '\0';
 #ifdef CONSOLE_DEBUG
 		{
 			sprintf_P(serCmdIOBuf, (PGM_P)F("ATN code:%d cmd: %s (len: %d) retATN: %d"), m_cmd.code, m_cmd.str, m_cmd.strLen, retATN);
-			Log(Information, FAC_IFACE, serCmdIOBuf);
+			Log(serCmdIOBuf);
 		}
 #endif
 
@@ -288,13 +204,28 @@ byte Interface::handler(void)
 				if(retATN == IEC::ATN_CMD_TALK) {
 					 // when the CMD channel is read (status), we first need to issue the host request. The data channel is opened directly.
 					if(CMD_CHANNEL == chan)
-						handleATNCmdCodeOpen(m_cmd); // This is typically an empty command,
-					handleATNCmdCodeDataTalk(chan); // ...but we do expect a response from PC that we can send back to CBM.
+						handleATNCmdCodeOpen(m_cmd);  // Typically an empty command for channel 15 message to Commodore
+					handleATNCmdCodeDataTalk(chan);  // Talk to Commodore, sending file and listing data
 				}
-				else if(retATN == IEC::ATN_CMD_LISTEN)
-					handleATNCmdCodeDataListen();
-				else if(retATN == IEC::ATN_CMD) // Here we are sending a command to PC and executing it, but not sending response
-					handleATNCmdCodeOpen(m_cmd);	// back to CBM, the result code of the command is however buffered on the PC side.
+				else if(retATN == IEC::ATN_CMD_LISTEN) {
+					handleATNCmdCodeDataListen();  // Listen for commands / data from the Commodore e.g. save data
+				}
+				else if(retATN == IEC::ATN_CMD) { // Here we are sending a command to PC and executing it, but not sending response
+					if (CMD_CHANNEL == chan) {
+
+						//Check if received M-E for semi-fast / gijoe mode, proceeding to epyx fastload
+						if(strcmp(m_cmd.str,"M-E\xa9\x01\r") == 0) {
+#ifdef USE_SERIAL
+							epyxFastloadProgram();
+#endif
+#ifdef USE_ROM
+							epyxFastloadROM();
+#endif
+						}
+					}
+					else
+						handleATNCmdCodeOpen(m_cmd);	// back to CBM, the result code of the command is however buffered on the PC side.
+				}
 				break;
 
 			case IEC::ATN_CODE_CLOSE:
@@ -303,16 +234,22 @@ byte Interface::handler(void)
 				break;
 
 			case IEC::ATN_CODE_LISTEN:
-				Log(Information, FAC_IFACE, "LISTEN");
+				//Log("LISTEN");
 				break;
 			case IEC::ATN_CODE_TALK:
-				Log(Information, FAC_IFACE, "TALK");
+				//Log("TALK");
 				break;
 			case IEC::ATN_CODE_UNLISTEN:
-				//Log(Information, FAC_IFACE, "UNLISTEN");
+				//Log("UNLISTEN");
 				break;
 			case IEC::ATN_CODE_UNTALK:
-				//Log(Information, FAC_IFACE, "UNTALK");
+				//Log("UNTALK");
+				break;
+			default:
+				if(retATN == IEC::ATN_CMD_TALK) {
+					//Needed to handle epyx fastload cartridge shortcut dir command (type $ on C64)
+					handleATNCmdCodeDataTalk(chan);  // Talk to Commodore, sending file and listing data
+				}
 				break;
 		} // switch
 	} // IEC not idle
@@ -320,168 +257,319 @@ byte Interface::handler(void)
 	return retATN;
 } // handler
 
-/*
-// Replaced handleATNCmdCodeOpen with new version below.
-// If payload to host is length 10 characters, character 10 is interpretted as the newline "\n" character, 
-// which is a common delimiter on host serial readers. Length is not used on the host end anymore, so replaced with 0
-// e.g. LOAD"QIX.T64",8 (or any 10 character load instruction: O + length + channel + 7 char text) has this issue
+
+#ifdef USE_SERIAL
+//Open the program and fastload to C64 with data sent serially from PC
+void Interface::epyxFastloadProgram()
+{
+	uint8_t bufLen, bytesRead, bufEnd, i, b;
+	uint8_t checksum = 0;
+	int16_t j;
+
+	//Switchover to full epyx fastload via semi-fastload gijoe protocol
+
+	//Initial handshake
+	noInterrupts();
+	m_iec.setData(true);
+	m_iec.setClock(false);
+
+	while(m_iec.getData() != false)
+	m_iec.setClock(true);
+	interrupts();
+
+	//Receive and checksum stage 2
+	for (j=0; j<256; j++) {
+		noInterrupts();
+		b = m_iec.gijoe_read_byte();
+		interrupts();
+		if (b < 0) {
+			Log("epyxFastloadProgram, read checksum error");
+			return;
+		}
+
+		if (j < 237)
+		//Stage 2 has some junk bytes at the end, ignore them
+		checksum ^= b;
+	}
+
+	//Check for known stage2 loaders
+	if (checksum != 0x91 && checksum != 0x5b) {
+		Log("epyxFastloadProgram, checksum total error");
+	}
+
+	//Receive file name length
+	noInterrupts();
+	j = m_iec.gijoe_read_byte();
+	interrupts();
+	if (j < 0) {
+		Log("epyxFastloadProgram, file length error");
+	}
+	bufLen = j + 3;  //Allow for 'O' (open), file/command length and channel
+
+	//Receive file name and build open command
+	serCmdIOBuf[0] = 'O';  //Open instruction
+	serCmdIOBuf[1] = bufLen;
+	serCmdIOBuf[2] = IEC::ATN_CODE_OPEN bitand 0xF;  //channel
+	do {
+		noInterrupts();
+		b = m_iec.gijoe_read_byte();
+		interrupts();
+		if (b < 0) {
+			Log("epyxFastloadProgram, file name error");
+			break;
+		}
+
+		serCmdIOBuf[--bufLen] = b;
+	} while (bufLen > 3);  //Preserve first 3 bytes of serCmdIOBuf 
+
+	m_iec.setClock(true);
+
+	//Request file open from PC which then returns a buffer load of data
+	Serial.write((const byte*)serCmdIOBuf, serCmdIOBuf[1]);  //send instruction to PC
+	Serial.println();
+
+	// Transfer data via full epyx fastload protocol
+	do {
+
+		ATOMIC_BLOCK(ATOMIC_FORCEON) {
+			m_iec.setClock(true);
+			m_iec.setData(true);
+		}
+
+		bytesRead = Serial.readBytes(serCmdIOBuf, 2); // read the ack type usually B/E or X if error
+		bufEnd = serCmdIOBuf[0];
+		bufLen = serCmdIOBuf[1];
+		if (bufEnd == 'X') {  //
+			m_iec.sendFNF();  //Error, return file not found on Commodore
+			break;
+		}
+		bytesRead = Serial.readBytes(serCmdIOBuf, bufLen); // read the program data bytes
+
+		//Ask for more bytes from the PC now, then send the current buffer load to the C64
+#if !defined(__AVR_ATmega328P__)  //Not suitable for Arduino uno
+		if (bufEnd != 'E') Serial.println('R');
+#endif
+		//Send the program data bytes via epyx fastload protocol
+		ATOMIC_BLOCK(ATOMIC_FORCEON) {
+
+			m_iec.setClock(true);
+			m_iec.setData(true);
+
+			// send number of bytes in sector
+			if (asm_epyxcart_send_byte(bufLen)) {
+				Log("epyxFastloadProgram, length fail");
+				break;
+			}
+
+			// send data
+			for (i=0; i<bufLen; i++) {
+				if (asm_epyxcart_send_byte(serCmdIOBuf[i])) {
+					Log("epyxFastloadProgram, send byte fail");
+					break;
+				}
+			}
+
+			// check ATN ok
+			if (m_iec.getATN() == false) {
+				Log("epyxFastloadProgram, ATN false");
+				bufEnd = 'E';
+				break;
+			}
+
+		}
+#if defined(__AVR_ATmega328P__)  //Suitable for Arduino uno
+      	if (bufEnd != 'E') Serial.println('R');
+#endif
+
+	} while (bufEnd == 'B');
+
+	ATOMIC_BLOCK(ATOMIC_FORCEON) {
+		m_iec.setClock(true);
+		m_iec.setData(true);
+	}
+
+}  // epyxFastloadProgram
+#endif
+
+#ifdef USE_ROM
+//Open the ROM program and fastload to C64
+void Interface::epyxFastloadROM()
+{
+	uint8_t b;
+	uint8_t checksum = 0;
+	int16_t bufLen, bufEnd, pos, i, j;
+	PGM_P binFile = reinterpret_cast<PGM_P>(gROMFileData);
+
+	//Switchover to full epyx fastload via semi-fastload gijoe protocol
+
+	//Initial handshake
+	noInterrupts();
+	m_iec.setData(true);
+	m_iec.setClock(false);
+
+	while(m_iec.getData() != false)
+	m_iec.setClock(true);
+	interrupts();
+
+	//Receive and checksum stage 2
+	for (j=0; j<256; j++) {
+		noInterrupts();
+		b = m_iec.gijoe_read_byte();
+		interrupts();
+		if (b < 0) {
+			Log("epyxFastloadROM, read checksum error");
+			return;
+		}
+
+		if (j < 237)
+		//Stage 2 has some junk bytes at the end, ignore them
+		checksum ^= b;
+	}
+
+	//Check for known stage2 loaders
+	if (checksum != 0x91 && checksum != 0x5b) {
+		Log("epyxFastloadROM, checksum total error");
+	}
+
+	//Receive file name length
+	noInterrupts();
+	j = m_iec.gijoe_read_byte();
+	interrupts();
+	if (j < 0) {
+		Log("epyxFastloadROM, file length error");
+	}
+
+	//Read the file name bytes, not needed for this ROM version
+	do {
+		noInterrupts();
+		b = m_iec.gijoe_read_byte();
+		interrupts();
+		if (b < 0) {
+			Log("epyxFastloadROM, file name error");
+			break;
+		}
+
+		j--;
+	} while (j > 0);
+
+	m_iec.setClock(false);
+
+	pos = 0;
+    bufLen = min(gROMFileSize, MAX_BYTES_PER_REQUEST-2);
+
+	// Transfer data via full epyx fastload protocol
+	ATOMIC_BLOCK(ATOMIC_FORCEON) {
+
+		while (1) {
+			m_iec.setClock(true);
+			m_iec.setData(true);
+
+			// send number of bytes in sector
+			if (asm_epyxcart_send_byte(lowByte(bufLen))) {  //Just the low byte of length is needed (is max 255 $FF)
+				Log("epyxFastloadROM, length fail");
+				break;
+			}
+
+			for (i=0; i<bufLen; i++) {
+				if (asm_epyxcart_send_byte(pgm_read_byte(binFile++))) {
+					Log("epyxFastloadROM, send byte fail");
+					break;
+				}
+			}
+
+			// check ATN ok
+			if (m_iec.getATN() == false) {
+				Log("epyxFastloadROM, ATN false");
+				break;
+			}
+
+			// exit after final sector
+			pos+=bufLen;
+			if(pos >= gROMFileSize) {
+				break;
+    		}
+
+			// read next sector
+			m_iec.setClock(false);
+			bufLen = min((gROMFileSize - pos), MAX_BYTES_PER_REQUEST-2);
+
+		}  // while
+	}  // atomic
+
+	m_iec.setClock(true);
+	m_iec.setData(true);
+
+}  // epyxFastloadROM
+#endif
+
+
+//Open file section
+//cmd is a type
+// code is 2 nibbles upper = command, lower = channel
+//   upper should be ATN_CODE_OPEN (value 240), lower should be read (value 0), i.e. set to ATN_CODE_OPEN
+// str will be the file name
+// strlen is the length of the file name string
 void Interface::handleATNCmdCodeOpen(IEC::ATNCmd& cmd)
 {
+	uint8_t bufLen = 3;  //Allow for 'O' (open), file/command length and channel
 
 	serCmdIOBuf[0] = 'O';
-	serCmdIOBuf[2] = cmd.code bitand 0xF;
-	byte length = 3;
-	memcpy(&serCmdIOBuf[length], cmd.str, cmd.strLen);
-	length += cmd.strLen;
-	// Set the length so that receiving side know how much to read out.
-	serCmdIOBuf[1] = length;
-	// NOTE: Host side handles BOTH file open command AND the command channel command (from the cmd.code).
-	COMPORT.write((const byte*)serCmdIOBuf, length);
-  COMPORT.println("");
-
-} // handleATNCmdCodeOpen
-*/
-
-void Interface::handleATNCmdCodeOpen(IEC::ATNCmd& cmd)
-{
-
-	serCmdIOBuf[0] = 'O';
-  serCmdIOBuf[1] = 0;  //Size doesn't matter
-	serCmdIOBuf[2] = cmd.code bitand 0xF;
-	memcpy(&serCmdIOBuf[3], cmd.str, cmd.strLen);
-	// NOTE: Host side handles BOTH file open command AND the command channel command (from the cmd.code).
-	COMPORT.write((const byte*)serCmdIOBuf, cmd.strLen+3);
-  COMPORT.println("");
+	serCmdIOBuf[2] = cmd.code bitand 0xF;  //channel
+	memcpy(&serCmdIOBuf[bufLen], cmd.str, cmd.strLen);
+	bufLen += cmd.strLen;
+	serCmdIOBuf[1] = bufLen;  //file/command length
+	Serial.write((const byte*)serCmdIOBuf, bufLen);  //send instruction to PC
+	Serial.println();
 
 } // handleATNCmdCodeOpen
 
+
+// Handle open command response and talk to Commodore, sending file and listing data
 void Interface::handleATNCmdCodeDataTalk(byte chan)
 {
-	byte lengthOrResult;
-	boolean wasSuccess = false;
+	while (!Serial.available());  // Wait for a response from the PC
+	char r = Serial.peek();  // Peek at response (this leaves the byte in the serial buffer)
+	switch(r) {
+	case 'B': case 'E':
+		sendFile();  //Load program on Commodore
+		break;
 
-	// process response into m_queuedError.
-	// Response: ><code in binary><CR>
+	case 'L': case 'l':
+		sendListing();  //Directory listing on Commodore
+		break;
 
-	serCmdIOBuf[0] = 0;
-	do {
-		lengthOrResult = COMPORT.readBytes(serCmdIOBuf, 1);
-	} while(lengthOrResult not_eq 1 or serCmdIOBuf[0] not_eq '>');
+	default:
+		uint8_t bytesRead = Serial.readBytes(serCmdIOBuf, 2); // read the two error bytes
+		m_iec.sendFNF();  //Error, return file not found on Commodore
 
-	if(not lengthOrResult or '>' not_eq serCmdIOBuf[0]) {
-		m_iec.sendFNF();
-		strcpy_P(serCmdIOBuf, (PGM_P)F("response not sync."));
-		Log(Error, FAC_IFACE, serCmdIOBuf);
 	}
-	else {
-		if(lengthOrResult = COMPORT.readBytes(serCmdIOBuf, 2)) {
-			if(2 == lengthOrResult) {
-				lengthOrResult = serCmdIOBuf[0];
-				wasSuccess = true;
-			}
-			else
-				Log(Error, FAC_IFACE, serCmdIOBuf);
-		}
-		if(CMD_CHANNEL == chan) {
-			m_queuedError = wasSuccess ? lengthOrResult : ErrSerialComm;
-			// Send status message
-			sendStatus();
-			// go back to OK state, we have dispatched the error to IEC host now.
-			m_queuedError = ErrOK;
-		}
-		else {
-			m_openState = wasSuccess ? lengthOrResult : O_NOTHING;
 
-			switch(m_openState) {
-			case O_INFO:
-				// Reset and send SD card info
-				reset();
-				sendListing();
-				break;
-
-			case O_FILE_ERR:
-				// FIXME: interface with Host for error info.
-				//sendListing(/*&send_file_err*/);
-				m_iec.sendFNF();
-				break;
-
-			case O_NOTHING:
-				// Say file not found
-				m_iec.sendFNF();
-				break;
-
-			case O_FILE:
-				// Send program file
-				sendFile();
-				break;
-
-			case O_DIR:
-				// Send listing
-				sendListing();
-				break;
-			}
-		}
-	}
-//	Log(Information, FAC_IFACE, serCmdIOBuf);
 } // handleATNCmdCodeDataTalk
 
 
+// Listen for commands / data from the Commodore
 void Interface::handleATNCmdCodeDataListen()
 {
-	byte lengthOrResult;
-	boolean wasSuccess = false;
-
-	// process response into m_queuedError.
-	// Response: ><code in binary><CR>
-
-	serCmdIOBuf[0] = 0;
-	do {
-		lengthOrResult = COMPORT.readBytes(serCmdIOBuf, 1);
-	} while(lengthOrResult not_eq 1 or serCmdIOBuf[0] not_eq '>');
-
-	if(not lengthOrResult or '>' not_eq serCmdIOBuf[0]) {
-		// FIXME: Check what the drive does here when things go wrong. FNF is probably not right.
-		m_iec.sendFNF();
-		strcpy_P(serCmdIOBuf, (PGM_P)F("response not sync."));
-		Log(Error, FAC_IFACE, serCmdIOBuf);
+	while (!Serial.available());  // Wait for a response from the PC
+	char r = Serial.peek();  // Peek at response (this leaves the byte in the serial buffer)
+	if (r == 'W') {  // Peek at response (this leaves the byte in the serial buffer)
+		saveFile();
 	}
 	else {
-		if(lengthOrResult = COMPORT.readBytes(serCmdIOBuf, 2)) {
-			if(2 == lengthOrResult) {
-				lengthOrResult = serCmdIOBuf[0];
-				wasSuccess = true;
-			}
-			else
-				Log(Error, FAC_IFACE, serCmdIOBuf);
-		}
-		m_queuedError = wasSuccess ? lengthOrResult : ErrSerialComm;
-
-		if(ErrOK == m_queuedError)
-			saveFile();
-//		else // FIXME: Check what the drive does here when saving goes wrong. FNF is probably not right. Dummyread entire buffer from CBM?
-//			m_iec.sendFNF();
+		m_iec.sendFNF();
 	}
+
 } // handleATNCmdCodeDataListen
 
 
 void Interface::handleATNCmdClose()
 {
-	// handle close of file. Host system will return the name of the last loaded file to us.
+	uint8_t bufLen, bytesRead, bufEnd;
 
-	COMPORT.println("C");
-	COMPORT.readBytes(serCmdIOBuf, 2);
-	byte resp = serCmdIOBuf[0];
-	if('N' == resp or 'n' == resp) { // N indicates we have a name. Case determines whether we loaded or saved data.
-		// get the length of the name as one byte.
-		byte len = serCmdIOBuf[1];
-		byte actual = COMPORT.readBytes(serCmdIOBuf, len);
-		if(len != actual) {
-			sprintf_P(serCmdIOBuf, (PGM_P)F("Exp: %d chars, got %d."), len, actual);
-			Log(Error, FAC_IFACE, serCmdIOBuf);
-		}
-	}
-	else if('C' == resp) {
-		if(m_iec.deviceNumber() not_eq serCmdIOBuf[1])
-			m_iec.setDeviceNumber(serCmdIOBuf[1]);
-	}
+	Serial.println('C');  //Tell PC to close the file
+	Serial.readBytes(serCmdIOBuf, 2);
+	bufEnd = serCmdIOBuf[0];
+	bufLen = serCmdIOBuf[1];
+	bytesRead = Serial.readBytes(serCmdIOBuf, bufLen);
+
 } // handleATNCmdClose
