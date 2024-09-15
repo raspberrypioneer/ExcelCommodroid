@@ -76,7 +76,7 @@ void Interface::sendListing()
 			interrupts();
 		}
 		if (bufEnd == 'L') {  //'Normal' directory line types received are 'L', except for the last one 'l'
-			Serial.println('L');  //Request another directory line
+			Serial.write('L');  //Request another directory line
 		}
 	} while (bufEnd == 'L');  //Continue while 'normal' directory lines are being returned
 
@@ -97,19 +97,19 @@ void Interface::sendFile()
 	do {
 	
 		//Serial read buffer will be populated in response to the first open file request and subsequent read requests using 'R'
-		bytesRead = Serial.readBytes(serCmdIOBuf, 2); // read the ack type ('B' or 'E') and length
+		bytesRead = Serial.readBytes(serCmdIOBuf, 2); // read the ack type ('B' or 'b') and length
 		bufEnd = serCmdIOBuf[0];
 		bufLen = serCmdIOBuf[1];
 		bytesRead = Serial.readBytes(serCmdIOBuf, bufLen); // read the program data bytes
 
 		//Ask for more bytes from the PC now, then send the current buffer load to the C64
 #if !defined(__AVR_ATmega328P__)  //Not suitable for Arduino uno
-		if (bufEnd != 'E') Serial.println('R');
+		if (bufEnd != 'b') Serial.write('R');
 #endif
 
 		for (i = 0; i < bufLen and ok; i++) {
 			noInterrupts();
-			if (bufEnd == 'E' and i == bufLen - 1)
+			if (bufEnd == 'b' and i == bufLen - 1)
 				ok = m_iec.sendEOI(serCmdIOBuf[i]);  // indicate end of file.
 			else
 				ok = m_iec.send(serCmdIOBuf[i]);
@@ -122,10 +122,10 @@ void Interface::sendFile()
 		}
 
 #if defined(__AVR_ATmega328P__)  //Suitable for Arduino uno
-      	if (bufEnd != 'E') Serial.println('R');
+      	if (bufEnd != 'b') Serial.write('R');
 #endif
 
-	} while (bufEnd == 'B' and ok); // keep asking for more as long as we don't get the 'E' or something else (indicating out of sync).
+	} while (bufEnd == 'B' and ok); // keep asking for more as long as we don't get the 'b' or something else (indicating out of sync).
 
 	if (ok) {
 		Log("sendFile completed");
@@ -144,19 +144,21 @@ void Interface::saveFile()
 	do {
 
 		// Receive bytes from Commodore until EOI detected
-		uint8_t bufLen = 2;  //Allow for 'W' and length prefix bytes
+		uint8_t bufLen = 2;  //Allow for 'W'/'w' and length prefix bytes
 		do {
 			noInterrupts();
 			serCmdIOBuf[bufLen++] = m_iec.receive();
 			interrupts();
 			done = (m_iec.state() bitand IEC::eoiFlag) or (m_iec.state() bitand IEC::errorFlag);
-		} while ((bufLen < 0xf0) and not done);
+		} while ((bufLen < 240) and not done);
 
 		// Send the bytes onto the PC
 		serCmdIOBuf[0] = 'W';
+		if (done) {
+			serCmdIOBuf[0] = 'w';
+		}
 		serCmdIOBuf[1] = bufLen;
 		Serial.write((const byte*)serCmdIOBuf, bufLen);
-		Serial.println();
 		Serial.flush();
 
 	} while (not done);
@@ -326,7 +328,6 @@ void Interface::epyxFastloadProgram()
 
 	//Request file open from PC which then returns a buffer load of data
 	Serial.write((const byte*)serCmdIOBuf, serCmdIOBuf[1]);  //send instruction to PC
-	Serial.println();
 
 	// Transfer data via full epyx fastload protocol
 	do {
@@ -341,13 +342,15 @@ void Interface::epyxFastloadProgram()
 		bufLen = serCmdIOBuf[1];
 		if (bufEnd == 'X') {  //
 			m_iec.sendFNF();  //Error, return file not found on Commodore
+			while (Serial.available())  //Flush out read buffer
+				Serial.read();
 			break;
 		}
 		bytesRead = Serial.readBytes(serCmdIOBuf, bufLen); // read the program data bytes
 
 		//Ask for more bytes from the PC now, then send the current buffer load to the C64
 #if !defined(__AVR_ATmega328P__)  //Not suitable for Arduino uno
-		if (bufEnd != 'E') Serial.println('R');
+		if (bufEnd != 'b') Serial.write('R');
 #endif
 		//Send the program data bytes via epyx fastload protocol
 		ATOMIC_BLOCK(ATOMIC_FORCEON) {
@@ -372,13 +375,13 @@ void Interface::epyxFastloadProgram()
 			// check ATN ok
 			if (m_iec.getATN() == false) {
 				Log("epyxFastloadProgram, ATN false");
-				bufEnd = 'E';
+				bufEnd = 'b';
 				break;
 			}
 
 		}
 #if defined(__AVR_ATmega328P__)  //Suitable for Arduino uno
-      	if (bufEnd != 'E') Serial.println('R');
+      	if (bufEnd != 'b') Serial.write('R');
 #endif
 
 	} while (bufEnd == 'B');
@@ -519,7 +522,6 @@ void Interface::handleATNCmdCodeOpen(IEC::ATNCmd& cmd)
 	bufLen += cmd.strLen;
 	serCmdIOBuf[1] = bufLen;  //file/command length
 	Serial.write((const byte*)serCmdIOBuf, bufLen);  //send instruction to PC
-	Serial.println();
 
 } // handleATNCmdCodeOpen
 
@@ -527,10 +529,11 @@ void Interface::handleATNCmdCodeOpen(IEC::ATNCmd& cmd)
 // Handle open command response and talk to Commodore, sending file and listing data
 void Interface::handleATNCmdCodeDataTalk(byte chan)
 {
+
 	while (!Serial.available());  // Wait for a response from the PC
 	char r = Serial.peek();  // Peek at response (this leaves the byte in the serial buffer)
 	switch(r) {
-	case 'B': case 'E':
+	case 'B': case 'b':
 		sendFile();  //Load program on Commodore
 		break;
 
@@ -539,10 +542,11 @@ void Interface::handleATNCmdCodeDataTalk(byte chan)
 		break;
 
 	default:
-		uint8_t bytesRead = Serial.readBytes(serCmdIOBuf, 2); // read the two error bytes
 		m_iec.sendFNF();  //Error, return file not found on Commodore
-
 	}
+
+	while (Serial.available())  //Flush out read buffer
+		Serial.read();
 
 } // handleATNCmdCodeDataTalk
 
@@ -551,25 +555,23 @@ void Interface::handleATNCmdCodeDataTalk(byte chan)
 void Interface::handleATNCmdCodeDataListen()
 {
 	while (!Serial.available());  // Wait for a response from the PC
-	char r = Serial.peek();  // Peek at response (this leaves the byte in the serial buffer)
-	if (r == 'W') {  // Peek at response (this leaves the byte in the serial buffer)
+	char r = Serial.read();  // Read response (this removes the byte in the serial buffer)
+	if (r == 'W') {
 		saveFile();
 	}
 	else {
 		m_iec.sendFNF();
 	}
 
+	while (Serial.available())  //Flush out read buffer
+		Serial.read();
+
 } // handleATNCmdCodeDataListen
 
 
 void Interface::handleATNCmdClose()
 {
-	uint8_t bufLen, bytesRead, bufEnd;
 
-	Serial.println('C');  //Tell PC to close the file
-	Serial.readBytes(serCmdIOBuf, 2);
-	bufEnd = serCmdIOBuf[0];
-	bufLen = serCmdIOBuf[1];
-	bytesRead = Serial.readBytes(serCmdIOBuf, bufLen);
+	Serial.write('C');  //Tell PC to close the file,  no response expected
 
 } // handleATNCmdClose

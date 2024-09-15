@@ -48,7 +48,7 @@ Main features
     ![folder structure](./docs/folder-structure.png)
 
 - D64, PRG and T64 program files are kept in `c64` and `vic20` subfolders
-- Box art images are optional, but if used must be located in the `art` subfolders and given the same name as their corresponding game with a jpg file extension, e.g. `Blue Max.d64` may have an associated image called `Blue Max.jpg`. RetroPie style image naming also work, e.g. `Blue Max-image.jpg`. Note that png image files unfortunately do not work
+- Box art images are optional, but if used must be located in the `art` subfolders and given the same name as their corresponding game with a jpg file extension, e.g. `Blue Max.d64` may have an associated image called `Blue Max.jpg`. RetroPie style image naming also works, e.g. `Blue Max-image.jpg`. Note that png image files unfortunately do not work
 
 ## Usage
 - Ensure all the physical connections are made between the Commodore, Arduino and PC. Check the Hardware Interface section for details and diagrams
@@ -74,9 +74,6 @@ Main features
 | ------- | ----------- |
 | `LOAD "*",8` | Used to load the selected D64, PRG or T64 based program. The disk drive number is always 8 |
 | `LOAD "*",8,1` | This version of the load command is needed for many Vic-20 games and some C64 games. The program will be loaded at the memory location given in the first two bytes of a PRG file |
-| `LOAD "program.ext",8` | Where `program.ext` is the full program name and extension, e.g. `LOAD "BLUE MAX.D64",8` loads `Blue Max.d64`. Unlike the other load commands above, there is no need to navigate to the program beforehand |
-| `LOAD "partial name.*",8` | Where `partial name` is contained in the program name, e.g. `LOAD "BLUE.*",8` loads `Blue Max.d64`. If there is more than one match, then the first one is used. Unlike the other load commands above, there is no need to navigate to the program beforehand |
-| `LOAD "program number",8` | Where `program number` is 1, 2, 3 etc counting PRG programs from the top of a directory listing, e.g. `LOAD "2",8` loads the second program on the listing. For D64 or T64 based programs, this is a shortcut way of loading a program somewhere on the listing without having to type the full program name |
 | `/*` | Shortcut for `LOAD "*",8,1` with C64 EPYX fast load cartridge only |
 | `RUN` | Runs the program following `LOAD` above |
 | `LOAD "$",8` | Loads a directory listing of the contents of a D64 or T64 file |
@@ -182,7 +179,7 @@ Copy both files into the main sketch folder and compile the sketch.
 | ------ | ----------- |
 | `c64`, `vic20` | Code for these sheets to handle connect / disconnect, program selection and viewing box art |
 | `frmBoxArtView` | Simple form for displaying box art |
-| `PROGRAM_LOADER` | Contains the main program and loop for getting messages from the Arduino and sending responses back. Includes handshake with Arduino and handles open program, close, get program size, read packet of data, read directory listing |
+| `PROGRAM_LOADER` | Contains the main program and loop for getting messages from the Arduino and sending responses back. Includes handshake with Arduino and handles open program, close, read packet of data, read directory listing |
 | `SERIAL_PORT_VBA` | Contains the code to connect and communicate with the Arduino. Works like an imported library, see the Acknowledgement section for details |
 | `UTILS` | Code for handling display of box art images |
 | `D64_DRIVER` | Class for reading D64 program files and returning data to the program loader |

@@ -9,7 +9,6 @@
 #define HANDSHAKE_OK "<END>\r"
 
 #define CONNECT_BLINKS 2
-#define CBM_DISKDRIVE 0
 
 static IEC iec(8);
 static Interface iface(iec);
@@ -53,7 +52,7 @@ static void connectMediaHost()
       Serial.read();
 
     //Send connect token to media host
-    Serial.println(HANDSHAKE_READY);
+    Serial.write(HANDSHAKE_READY);
     delay(1000);
 
     //Check for acknowledgement ok response and continue when received
@@ -79,6 +78,6 @@ static void connectMediaHost()
     digitalWrite(LED_BUILTIN, HIGH);
     delay(250); 
   }
-  Serial.println(HANDSHAKE_OK);
+  Serial.write(HANDSHAKE_OK);
 
 } // connectMediaHost
